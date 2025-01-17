@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use std::collections::HashMap;
 
-use serde_yaml::{self, value};
+use serde_yaml;
 
 use futures::StreamExt;
 use hyper::Body;
@@ -56,6 +56,7 @@ struct Server {
 impl Server {
     pub async fn run(&self) {
         let addr = format!("{}:{}", &self.address, self.port).parse().unwrap();
+        let mut handles = Vec::new();
         let mut stream_config = HashMap::new();
         let mut config = HashMap::new();
         for v in self.config.iter() {
@@ -63,11 +64,18 @@ impl Server {
             config.insert(v.1.path.clone(), v.1.clone());
         }
 
-        let make_svc = make_service_fn(move |_conn| {
-            futures::future::ok::<_, std::convert::Infallible>(service_fn({
-                let value = stream_config.clone();
-                move |req| serve(req, value)
-            }))
+        let make_svc = make_service_fn({
+            move |_conn| {
+                futures::future::ok::<_, std::convert::Infallible>(
+                    service_fn({
+                        let v1 = stream_config.clone();
+                        move |req| {
+                            let v2 = v1.clone();
+                            serve(req, v2)
+                        }
+                    })
+                )
+            }
         });
 
         tokio::spawn(async move {
@@ -76,7 +84,7 @@ impl Server {
             server.await.unwrap()
         });
 
-        for stream in config.iter() {
+        for stream in config.into_iter() {
             let default_body = Bytes::from(&DEFAULT_BODY_CONTENT[..]);
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, "image/jpeg".parse().unwrap());
@@ -112,15 +120,21 @@ impl Server {
             });
 
             // start reading camera
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 loop {
                     let client = hyper::Client::new();
-                    let res = client.get(stream.1.url.parse().unwrap()).await.unwrap();
-                    if !res.status().is_success() {
-                        eprintln!("HTTP request failed with status {}", res.status());
-                        tx.send(default_part.clone());
+                    let res = client.get(stream.1.url.parse().unwrap()).await;
+                    if res.is_err() {
+                        println!("err: {:?}", res.err().unwrap());
                         break;
                     }
+                    let res = res.unwrap();
+                    if !res.status().is_success() {
+                        eprintln!("HTTP request failed with status {}", res.status());
+                        tx.send(default_part.clone()).unwrap();
+                        break;
+                    }
+                    println!("Reading {}", &stream.1.url);
                     let content_type: mime::Mime = res
                     .headers()
                     .get(http::header::CONTENT_TYPE)
@@ -140,12 +154,19 @@ impl Server {
                     }
                 }
             });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let _ = handle.await;
         }
     }
 }
 
 async fn serve(req: Request<Body>, config: HashMap<String, Arc<Mutex<broadcast::Sender<Part>>>>) -> Result<Response<Body>, Box<dyn std::error::Error + Send + Sync>> {
     let path = req.uri().to_string();
+    println!("Accessed: {}", path);
     let res = config.get(&path);
     if res.is_some() {
         let recv = res.unwrap().lock().unwrap().subscribe();
@@ -155,6 +176,7 @@ async fn serve(req: Request<Body>, config: HashMap<String, Arc<Mutex<broadcast::
             .header(http::header::CONTENT_TYPE, "multipart/mixed; boundary=".to_string() + BOUNDARY_STRING)
             .body(hyper::Body::wrap_stream(stream))?)
     } else {
+        println!("404 returned");
         Ok(hyper::Response::builder()
             .status(404)
             .body(hyper::Body::from("404 Not found"))?
@@ -221,7 +243,7 @@ async fn main() {
     }
 
     for handle in handles {
-        handle.await;
+        let _ = handle.await;
     }
 
     return;
