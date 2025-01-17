@@ -59,10 +59,10 @@ impl Server {
     pub async fn run(&self) {
         let addr = format!("{}:{}", &self.address, self.port).parse().unwrap();
         let mut handles = Vec::new();
-        let mut stream_config = HashMap::new();
+        let mut stream_config = Arc::new(HashMap::new());
         let mut config = HashMap::new();
         for v in self.config.iter() {
-            stream_config.insert(v.1.path.clone(), v.1.broadcaster.clone());
+            Arc::get_mut(&mut stream_config).unwrap().insert(v.1.path.clone(), v.1.broadcaster.clone());
             config.insert(v.1.path.clone(), v.1.clone());
         }
 
@@ -71,10 +71,10 @@ impl Server {
                 let raddr = conn.remote_addr().to_string();
                 futures::future::ok::<_, std::convert::Infallible>(
                     service_fn({
-                        let v1 = stream_config.clone();
+                        let v1 = Arc::clone(&stream_config);
                         let v2 = raddr.clone();
                         move |req| {
-                            let v3 = v1.clone();
+                            let v3 = Arc::clone(&v1);
                             let v4 = v2.clone();
                             serve(req, v3, v4)
                         }
@@ -177,7 +177,7 @@ impl Server {
     }
 }
 
-async fn serve(req: Request<Body>, config: HashMap<String, Arc<Mutex<broadcast::Sender<Part>>>>, raddr: String) -> Result<Response<Body>, Box<dyn std::error::Error + Send + Sync>> {
+async fn serve(req: Request<Body>, config: Arc<HashMap<String, Arc<Mutex<broadcast::Sender<Part>>>>>, raddr: String) -> Result<Response<Body>, Box<dyn std::error::Error + Send + Sync>> {
     let path = req.uri().to_string();
     let version = req.version();
     let date = Local::now();
