@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use std::collections::HashMap;
 
+use chrono::Local;
 use serde_yaml;
 
 use futures::StreamExt;
@@ -16,10 +17,11 @@ use hyper::body::Bytes;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::{self as http, HeaderMap, Request, Response};
 use hyper::service::{make_service_fn, service_fn};
+use hyper::server::conn::AddrStream;
 
 use multipart_stream::Part;
 use tokio::sync::{broadcast, watch};
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, interval, sleep};
 
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -65,13 +67,16 @@ impl Server {
         }
 
         let make_svc = make_service_fn({
-            move |_conn| {
+            move |conn: &AddrStream| {
+                let raddr = conn.remote_addr().to_string();
                 futures::future::ok::<_, std::convert::Infallible>(
                     service_fn({
                         let v1 = stream_config.clone();
+                        let v2 = raddr.clone();
                         move |req| {
-                            let v2 = v1.clone();
-                            serve(req, v2)
+                            let v3 = v1.clone();
+                            let v4 = v2.clone();
+                            serve(req, v3, v4)
                         }
                     })
                 )
@@ -90,7 +95,7 @@ impl Server {
             headers.insert(CONTENT_TYPE, "image/jpeg".parse().unwrap());
             headers.insert(CONTENT_LENGTH, "8857".parse().unwrap());
             let default_part = Part{headers, body: default_body};
-            println!("{} {} {}", stream.1.path, stream.1.url, stream.1.fps);
+            println!("Serving {} on {} fps: {}", stream.1.url, stream.1.path, stream.1.fps);
 
             // start server broadcast channel writer
             let (tx, mut rx) = watch::channel(default_part.clone());
@@ -121,18 +126,26 @@ impl Server {
 
             // start reading camera
             let handle = tokio::spawn(async move {
+                let mut backoff_secs = 1;
                 loop {
                     let client = hyper::Client::new();
                     let res = client.get(stream.1.url.parse().unwrap()).await;
                     if res.is_err() {
-                        println!("err: {:?}", res.err().unwrap());
-                        break;
+                        eprintln!("err: {:?}", res.err().unwrap());
+                        eprintln!("trying again in {} seconds.", backoff_secs);
+                        tx.send(default_part.clone()).unwrap();
+                        sleep(Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = std::cmp::min( backoff_secs + backoff_secs, 300);
+                        continue;
                     }
                     let res = res.unwrap();
                     if !res.status().is_success() {
                         eprintln!("HTTP request failed with status {}", res.status());
+                        eprintln!("trying again in {} seconds.", backoff_secs);
                         tx.send(default_part.clone()).unwrap();
-                        break;
+                        sleep(Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = std::cmp::min(backoff_secs + backoff_secs, 300);
+                        continue;
                     }
                     println!("Reading {}", &stream.1.url);
                     let content_type: mime::Mime = res
@@ -164,11 +177,14 @@ impl Server {
     }
 }
 
-async fn serve(req: Request<Body>, config: HashMap<String, Arc<Mutex<broadcast::Sender<Part>>>>) -> Result<Response<Body>, Box<dyn std::error::Error + Send + Sync>> {
+async fn serve(req: Request<Body>, config: HashMap<String, Arc<Mutex<broadcast::Sender<Part>>>>, raddr: String) -> Result<Response<Body>, Box<dyn std::error::Error + Send + Sync>> {
     let path = req.uri().to_string();
-    println!("Accessed: {}", path);
+    let version = req.version();
+    let date = Local::now();
+    let method = req.method().to_string();
     let res = config.get(&path);
     if res.is_some() {
+        println!("{} - - [{}] \"{} {} {:?}\" 200 -", raddr, date.format("%d/%m/%Y:%H:%M:%S %z"), method, path, version);
         let recv = res.unwrap().lock().unwrap().subscribe();
         let stream = BroadcastStream::new(recv);
         let stream = multipart_stream::serialize(stream, BOUNDARY_STRING);
@@ -176,6 +192,7 @@ async fn serve(req: Request<Body>, config: HashMap<String, Arc<Mutex<broadcast::
             .header(http::header::CONTENT_TYPE, "multipart/mixed; boundary=".to_string() + BOUNDARY_STRING)
             .body(hyper::Body::wrap_stream(stream))?)
     } else {
+        println!("{} - - [{}] \"{} {} {:?}\" 404 13", raddr, date.format("%d/%m/%Y:%H:%M:%S %z"), method, path, version);
         println!("404 returned");
         Ok(hyper::Response::builder()
             .status(404)
@@ -228,9 +245,6 @@ async fn main() {
         }
 
 
-        for stream in config.iter() {
-            println!("{} {} {}", stream.1.path, stream.1.url, stream.1.fps)
-        }
         let address = address.clone();
 
         let handle = tokio::spawn(async move {
