@@ -71,6 +71,16 @@ impl Server {
         Server { streams: config.streams, port: config.port, address: config.address }
     }
 
+    pub fn init(&mut self) {
+        for (_stream_name, stream) in &mut self.streams {
+            if !stream.path.starts_with("/") {
+                stream.path = format!("/{}", stream.path);
+            }
+            let (tx, _) = broadcast::channel(1);
+            stream.broadcaster = Some(Arc::new(Mutex::new(tx)));
+        }
+    }
+
     pub async fn run(&self) {
         let addr = format!("{}:{}", &self.address, self.port).parse().unwrap();
         let mut handles = Vec::new();
