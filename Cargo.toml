@@ -3,6 +3,9 @@ name = "mjpeg-proxy"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "mjpeg_proxy"
+
 [dependencies]
 futures = "0.3.31"
 mime = "0.3.17"
@@ -13,3 +16,4 @@ lazy-static-include = "3.2.1"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 lazy_static = "1.5.0"
 serde_yaml = "0.9.34"
+serde = { version = "1.0.217", features = ["derive"] }
