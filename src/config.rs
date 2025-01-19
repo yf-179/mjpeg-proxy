@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::fs;
 use std::error::Error;
+use std::fs;
 
 use crate::server::Server;
 

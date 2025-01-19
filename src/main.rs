@@ -8,7 +8,6 @@ use tokio::task::JoinHandle;
 
 use mjpeg_proxy::config;
 
-
 #[tokio::main]
 async fn main() {
     let servers = config::parse_config("config.yml").expect("Failed to read config");
@@ -17,9 +16,7 @@ async fn main() {
     for (_server_name, mut server) in servers {
         server.init();
 
-        let handle = tokio::spawn(async move {
-            server.run().await
-        });
+        let handle = tokio::spawn(async move { server.run().await });
         handles.push(handle);
     }
 
